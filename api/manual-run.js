@@ -54,7 +54,11 @@ export default async function handler(req, res) {
     }
 
     // 4. Clear the Google Sheet (except header row) before this batch
-    await clearSheet();
+    try {
+      await clearSheet();
+    } catch (sheetErr) {
+      return res.status(500).json({ error: 'clearSheet failed', message: sheetErr.message, cause: sheetErr.cause?.message });
+    }
 
     // 5. For each post, generate a comment and post to Slack
     const results = [];
@@ -73,7 +77,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ processed: results.length, results });
   } catch (err) {
     console.error('Run error:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message, stack: err.stack, cause: err.cause?.message });
   }
 }
 
