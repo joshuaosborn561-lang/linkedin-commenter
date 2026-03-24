@@ -94,10 +94,11 @@ async function fetchPastComments() {
   try {
     const token = await getGoogleAccessToken();
     const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-    const range = 'Sheet1!B2:B';
+    // Read from Voice Log sheet (col A = postUrl, col B = comment)
+    const range = 'Voice Log!A2:B';
 
     const res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
       {
         headers: { Authorization: `Bearer ${token}` },
       }
@@ -105,8 +106,11 @@ async function fetchPastComments() {
 
     const data = await res.json();
     if (!data.values) return [];
-    // Return up to 10 most recent comments
-    return data.values.flat().filter(Boolean).slice(-10);
+    // Return up to 10 most recent entries as {postUrl, comment} pairs
+    return data.values
+      .filter(row => row[0] && row[1])
+      .slice(-10)
+      .map(row => ({ postUrl: row[0], comment: row[1] }));
   } catch (e) {
     console.error('Failed to fetch past comments:', e);
     return [];
@@ -121,8 +125,10 @@ function buildPrompt(post, pastComments = []) {
 - "I have been saying this for a while...to my wife, but ask her, I really have!"`;
 
   if (pastComments.length > 0) {
-    const samples = pastComments.map(c => `- "${c}"`).join('\n');
-    voiceSection += `\n\nRecent approved comments by Josh (learn from these — match this tone, style, and substance):\n${samples}`;
+    const samples = pastComments.map(c =>
+      `Post: ${c.postUrl}\nJosh's comment: "${c.comment}"`
+    ).join('\n\n');
+    voiceSection += `\n\nRecent approved/edited comments by Josh with their post context (learn from these — match this tone, style, and substance):\n${samples}`;
   }
 
   return `You are writing a LinkedIn comment on behalf of Josh, founder of SalesGlider Growth — a B2B outbound lead gen agency. Josh has a $20M B2B sales background and posts regularly about cold email, outbound strategy, and GTM.

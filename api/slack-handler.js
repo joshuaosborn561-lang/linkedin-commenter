@@ -52,19 +52,23 @@ async function processEvent(event) {
   const { postUrl, comment } = parentData;
 
   if (text === 'post') {
-    // Approve — write to Google Sheets
     try {
-      await writeToSheets(postUrl, comment, 'approved');
+      // Write to Sheet1 for the phantom to post
+      await writeToSheets('Sheet1!A:C', postUrl, comment, 'approved');
+      // Also log to Voice Log for voice learning (includes post context)
+      await writeToVoiceLog(postUrl, comment);
       await sendSlackReply(event.channel, event.thread_ts, '✅ Comment saved to Google Sheet and queued for posting.');
     } catch (err) {
       await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save to Google Sheet: ${err.message}`);
     }
 
   } else if (text.startsWith('edit ')) {
-    // Edit — use the user's replacement text
     const editedComment = originalText.slice(5).trim();
     try {
-      await writeToSheets(postUrl, editedComment, 'edited');
+      // Write edited version to Sheet1 for posting
+      await writeToSheets('Sheet1!A:C', postUrl, editedComment, 'edited');
+      // Log the user's actual edit to Voice Log — this is the real voice data
+      await writeToVoiceLog(postUrl, editedComment);
       await sendSlackReply(event.channel, event.thread_ts, `✅ Your edit has been saved to Google Sheet:\n\`\`\`${editedComment}\`\`\``);
     } catch (err) {
       await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save edit to Google Sheet: ${err.message}`);
@@ -121,31 +125,50 @@ async function getParentMessage(channel, threadTs) {
   }
 }
 
-async function writeToSheets(postUrl, comment, status) {
-  // Get OAuth token
+async function writeToSheets(range, postUrl, comment, status) {
   const token = await getGoogleAccessToken();
-
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  const range = 'Sheet1!A:C';
-
-  const body = {
-    values: [[postUrl, comment, status]],
-  };
 
   const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ values: [[postUrl, comment, status]] }),
     }
   );
 
   const data = await res.json();
   if (data.error) throw new Error(`Sheets error: ${JSON.stringify(data.error)}`);
+  return data;
+}
+
+async function writeToVoiceLog(postUrl, comment) {
+  const token = await getGoogleAccessToken();
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  const range = 'Voice Log!A:C';
+  const timestamp = new Date().toISOString();
+
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ values: [[postUrl, comment, timestamp]] }),
+    }
+  );
+
+  const data = await res.json();
+  if (data.error) {
+    // Don't throw — voice log failure shouldn't block the main flow
+    console.error('Voice log write failed:', data.error);
+  }
   return data;
 }
 
