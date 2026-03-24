@@ -35,27 +35,16 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to fetch agent', details: agent });
     }
 
-    // 2. Fetch the output from PhantomBuster API
-    const outputRes = await fetch(
-      `https://api.phantombuster.com/api/v2/agents/fetch-output?id=${process.env.PHANTOM_ID}`,
-      {
-        headers: {
-          'X-Phantombuster-Key': pbKey,
-        },
-      }
-    );
-    const outputData = await outputRes.json();
+    // 2. Fetch the results JSON from PhantomBuster S3
+    const { s3Folder, orgS3Folder } = agent;
+    const jsonUrl = `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`;
 
-    if (!outputData.resultObject) {
-      return res.status(500).json({ error: 'No resultObject from PhantomBuster', details: outputData });
+    const resultsRes = await fetch(jsonUrl);
+    if (!resultsRes.ok) {
+      return res.status(500).json({ error: 'Failed to fetch results JSON', url: jsonUrl, status: resultsRes.status });
     }
 
-    let posts;
-    try {
-      posts = JSON.parse(outputData.resultObject);
-    } catch (parseErr) {
-      return res.status(500).json({ error: 'Failed to parse resultObject', raw: outputData.resultObject?.slice(0, 500) });
-    }
+    const posts = await resultsRes.json();
 
     // 3. Filter to posts that have actual content
     const validPosts = posts.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
