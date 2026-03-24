@@ -35,23 +35,72 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to fetch agent', details: agent });
     }
 
-    // 2. Fetch the results JSON from PhantomBuster S3
+    // 2. Fetch results — try the output endpoint first, fallback to S3
     const { s3Folder, orgS3Folder } = agent;
-    const jsonUrl = `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`;
 
-    const resultsRes = await fetch(jsonUrl);
-    if (!resultsRes.ok) {
-      return res.status(500).json({ error: 'Failed to fetch results JSON', url: jsonUrl, status: resultsRes.status });
+    // Try PhantomBuster's fetch-output endpoint (returns actual scrape results)
+    let posts;
+    try {
+      const outputRes = await fetch(
+        `https://api.phantombuster.com/api/v2/agents/fetch-output?id=${process.env.PHANTOM_ID}`,
+        {
+          headers: {
+            'X-Phantombuster-Key': pbKey,
+            'X-Phantombuster-Key-1': pbKey,
+          },
+        }
+      );
+      const outputData = await outputRes.json();
+
+      // The output contains a resultObject field with the JSON results
+      if (outputData.resultObject) {
+        posts = JSON.parse(outputData.resultObject);
+      } else {
+        // Fallback: try S3 result.json
+        const jsonUrl = `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`;
+        const resultsRes = await fetch(jsonUrl);
+        if (!resultsRes.ok) {
+          return res.status(500).json({ error: 'Failed to fetch results', url: jsonUrl, status: resultsRes.status });
+        }
+        posts = await resultsRes.json();
+      }
+    } catch (fetchErr) {
+      // Fallback: try S3 result.json
+      const jsonUrl = `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`;
+      const resultsRes = await fetch(jsonUrl);
+      if (!resultsRes.ok) {
+        return res.status(500).json({ error: 'Failed to fetch results', url: jsonUrl, status: resultsRes.status });
+      }
+      posts = await resultsRes.json();
     }
 
-    const posts = await resultsRes.json();
+    if (!Array.isArray(posts)) {
+      posts = [posts];
+    }
 
-    // 3. Filter to posts that have actual content
-    const validPosts = posts.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
+    // 3. Normalize field names — PhantomBuster uses varying key names
+    const normalized = posts.map(p => ({
+      postUrl: p.postUrl || p.url || p.link || p.postLink || '',
+      postText: p.postText || p.text || p.description || p.content || p.postContent || '',
+      profileUrl: p.profileUrl || p.authorProfileUrl || p.authorUrl || p.profile || '',
+      _raw: p,
+    }));
+
+    const validPosts = normalized.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
 
     if (validPosts.length === 0) {
-      const sample = posts.slice(0, 2).map(p => Object.keys(p));
-      return res.status(200).json({ message: 'No valid posts found', total: posts.length, sampleKeys: sample, firstPost: posts[0] });
+      const errors = posts.filter(p => p.error).map(p => p.error);
+      const uniqueErrors = [...new Set(errors)];
+      return res.status(200).json({
+        message: 'No valid posts found',
+        total: posts.length,
+        postsWithErrors: errors.length,
+        errors: uniqueErrors,
+        hint: uniqueErrors.includes('No new results found')
+          ? 'PhantomBuster returned no new results. Try re-running the phantom or resetting its result file.'
+          : 'Posts are missing postUrl or postText fields.',
+        firstPost: posts[0],
+      });
     }
 
     // 4. Clear the Google Sheet (except header row) before this batch
@@ -211,7 +260,7 @@ async function clearSheet() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
   // Clear everything from row 2 onward (preserve header row)
-  const range = 'Sheet1!A2:C';
+  const range = 'Sheet1!A2:B';
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:clear`,
     {

@@ -52,14 +52,14 @@ async function processEvent(event) {
   const { postUrl, comment } = parentData;
 
   if (text === 'post') {
-    // Approve — write to Google Sheets
-    await writeToSheets(postUrl, comment, 'approved');
+    // Approve — write to Google Sheets (col A = postUrl, col B = comment)
+    await writeToSheets(postUrl, comment);
     await sendSlackReply(event.channel, event.thread_ts, '✅ Locked in. Comment queued for posting.');
 
   } else if (text.startsWith('edit ')) {
     // Edit — use the user's replacement text
     const editedComment = originalText.slice(5).trim();
-    await writeToSheets(postUrl, editedComment, 'edited');
+    await writeToSheets(postUrl, editedComment);
     await sendSlackReply(event.channel, event.thread_ts, `✅ Got it. Saved your edit:\n\`\`\`${editedComment}\`\`\`\nReply with *post* if you're happy with it.`);
 
   } else if (text === 'skip') {
@@ -111,15 +111,15 @@ async function getParentMessage(channel, threadTs) {
   }
 }
 
-async function writeToSheets(postUrl, comment, status) {
+async function writeToSheets(postUrl, comment) {
   // Get OAuth token
   const token = await getGoogleAccessToken();
 
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  const range = 'Sheet1!A:C';
+  const range = 'Sheet1!A:B';
 
   const body = {
-    values: [[postUrl, comment, status]],
+    values: [[postUrl, comment]],
   };
 
   const res = await fetch(
