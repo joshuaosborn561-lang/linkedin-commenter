@@ -53,14 +53,22 @@ async function processEvent(event) {
 
   if (text === 'post') {
     // Approve — write to Google Sheets
-    await writeToSheets(postUrl, comment, 'approved');
-    await sendSlackReply(event.channel, event.thread_ts, '✅ Locked in. Comment queued for posting.');
+    try {
+      await writeToSheets(postUrl, comment, 'approved');
+      await sendSlackReply(event.channel, event.thread_ts, '✅ Comment saved to Google Sheet and queued for posting.');
+    } catch (err) {
+      await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save to Google Sheet: ${err.message}`);
+    }
 
   } else if (text.startsWith('edit ')) {
     // Edit — use the user's replacement text
     const editedComment = originalText.slice(5).trim();
-    await writeToSheets(postUrl, editedComment, 'edited');
-    await sendSlackReply(event.channel, event.thread_ts, `✅ Got it. Saved your edit:\n\`\`\`${editedComment}\`\`\`\nReply with *post* if you're happy with it.`);
+    try {
+      await writeToSheets(postUrl, editedComment, 'edited');
+      await sendSlackReply(event.channel, event.thread_ts, `✅ Your edit has been saved to Google Sheet:\n\`\`\`${editedComment}\`\`\``);
+    } catch (err) {
+      await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save edit to Google Sheet: ${err.message}`);
+    }
 
   } else if (text === 'skip') {
     await sendSlackReply(event.channel, event.thread_ts, '↩️ Comment skipped. Moving on.');
@@ -68,9 +76,9 @@ async function processEvent(event) {
 }
 
 async function getParentMessage(channel, threadTs) {
-  // Fetch the thread's parent message
+  // Fetch the thread's parent message with metadata included
   const res = await fetch(
-    `https://slack.com/api/conversations.replies?channel=${channel}&ts=${threadTs}&limit=1`,
+    `https://slack.com/api/conversations.replies?channel=${channel}&ts=${threadTs}&limit=1&include_all_metadata=true`,
     { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } }
   );
   const data = await res.json();
@@ -79,29 +87,31 @@ async function getParentMessage(channel, threadTs) {
 
   const parent = data.messages[0];
 
-  // Extract postUrl and comment from the message blocks
-  // They're stored in a plain-text section at the bottom of the message
   try {
-    const blocks = parent.blocks || [];
     let postUrl = null;
     let comment = null;
 
-    for (const block of blocks) {
-      if (block.type === 'section' && block.text?.text) {
-        const t = block.text.text;
-        if (t.includes('Post URL (for logging):')) {
-          const urlMatch = t.match(/Post URL \(for logging\): (https?:\/\/\S+)/);
-          if (urlMatch) postUrl = urlMatch[1];
-          const commentMatch = t.match(/Comment \(for logging\): (.+)/s);
-          if (commentMatch) comment = commentMatch[1].trim();
-        }
-      }
-    }
-
-    // Fallback: try metadata if blocks didn't work
-    if (!postUrl && parent.metadata?.event_payload) {
+    // Try metadata first (most reliable)
+    if (parent.metadata?.event_payload) {
       postUrl = parent.metadata.event_payload.postUrl;
       comment = parent.metadata.event_payload.comment;
+    }
+
+    // Fallback: parse the hidden context block (postUrl::...::comment::...::end)
+    if (!postUrl) {
+      const blocks = parent.blocks || [];
+      for (const block of blocks) {
+        if (block.type === 'context' && block.elements) {
+          for (const el of block.elements) {
+            const t = el.text || '';
+            const match = t.match(/postUrl::(.+?)::comment::(.+?)::end/s);
+            if (match) {
+              postUrl = match[1].trim();
+              comment = match[2].trim();
+            }
+          }
+        }
+      }
     }
 
     return postUrl && comment ? { postUrl, comment } : null;
