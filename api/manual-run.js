@@ -50,7 +50,8 @@ export default async function handler(req, res) {
     const validPosts = posts.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
 
     if (validPosts.length === 0) {
-      return res.status(200).json({ message: 'No valid posts found', total: posts.length });
+      const sample = posts.slice(0, 2).map(p => Object.keys(p));
+      return res.status(200).json({ message: 'No valid posts found', total: posts.length, sampleKeys: sample, firstPost: posts[0] });
     }
 
     // 4. Clear the Google Sheet (except header row) before this batch
