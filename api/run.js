@@ -8,12 +8,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // Optional: protect with a secret
-  const authHeader = req.headers['x-cron-secret'];
-  if (process.env.CRON_SECRET && authHeader !== process.env.CRON_SECRET) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
   try {
     // 1. Fetch PhantomBuster agent metadata to get S3 file location
     const pbKey = process.env.PHANTOMBUSTER_API_KEY;
