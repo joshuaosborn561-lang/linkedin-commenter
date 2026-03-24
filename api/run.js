@@ -16,9 +16,15 @@ export default async function handler(req, res) {
 
   try {
     // 1. Fetch PhantomBuster agent metadata to get S3 file location
+    const pbKey = process.env.PHANTOMBUSTER_API_KEY;
     const agentRes = await fetch(
       `https://api.phantombuster.com/api/v2/agents/fetch?id=${process.env.PHANTOM_ID}`,
-      { headers: { 'X-Phantombuster-Key': process.env.PHANTOMBUSTER_API_KEY } }
+      {
+        headers: {
+          'X-Phantombuster-Key': pbKey,
+          'X-Phantombuster-Key-1': pbKey,
+        },
+      }
     );
     const agent = await agentRes.json();
 
