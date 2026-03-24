@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "PhantomBuster → Claude → Slack approval → Google Sheets pipeline",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod"

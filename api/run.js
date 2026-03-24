@@ -1,6 +1,8 @@
 // api/run.js
 // Triggered by a cron or manual call. Fetches PB results, generates comments, posts to Slack for review.
 
+import crypto from 'crypto';
+
 export default async function handler(req, res) {
   if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -42,7 +44,10 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'No valid posts found', total: posts.length });
     }
 
-    // 4. For each post, generate a comment and post to Slack
+    // 4. Clear the Google Sheet (except header row) before this batch
+    await clearSheet();
+
+    // 5. For each post, generate a comment and post to Slack
     const results = [];
     for (const post of validPosts.slice(0, 20)) {
       try {
@@ -185,6 +190,68 @@ async function postToSlack(post, comment) {
     throw new Error(`Slack error: ${slackData.error}`);
   }
   return slackData;
+}
+
+async function clearSheet() {
+  const token = await getGoogleAccessToken();
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+  // Clear everything from row 2 onward (preserve header row)
+  const range = 'Sheet1!A2:C';
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:clear`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  const data = await res.json();
+  if (data.error) throw new Error(`Sheets clear error: ${JSON.stringify(data.error)}`);
+  return data;
+}
+
+async function getGoogleAccessToken() {
+  const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    iss: serviceAccount.client_email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  };
+
+  const jwt = await createJWT(payload, serviceAccount.private_key);
+
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+  });
+
+  const tokenData = await tokenRes.json();
+  if (!tokenData.access_token) throw new Error('Failed to get Google access token');
+  return tokenData.access_token;
+}
+
+async function createJWT(payload, privateKeyPem) {
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
+
+  const signingInput = `${encode(header)}.${encode(payload)}`;
+
+  const { createSign } = crypto;
+  const sign = createSign('RSA-SHA256');
+  sign.update(signingInput);
+  const signature = sign.sign(privateKeyPem, 'base64url');
+
+  return `${signingInput}.${signature}`;
 }
 
 function sleep(ms) {
