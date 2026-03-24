@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "crons": [
+    {
+      "path": "/api/run",
+      "schedule": "0 9 * * 1"
+    }
+  ],
+  "env": {
+    "PHANTOMBUSTER_API_KEY": "@phantombuster_api_key",
+    "PHANTOM_ID": "@phantom_id",
+    "ANTHROPIC_API_KEY": "@anthropic_api_key",
+    "SLACK_BOT_TOKEN": "@slack_bot_token",
+    "SLACK_SIGNING_SECRET": "@slack_signing_secret",
+    "SLACK_CHANNEL_ID": "@slack_channel_id",
+    "GOOGLE_SHEET_ID": "@google_sheet_id",
+    "GOOGLE_SERVICE_ACCOUNT_JSON": "@google_service_account_json",
+    "CRON_SECRET": "@cron_secret"
+  }
+}
