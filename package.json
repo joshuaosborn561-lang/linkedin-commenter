@@ -1,0 +1,13 @@
+{
+  "name": "linkedin-commenter",
+  "version": "1.0.0",
+  "description": "PhantomBuster → Claude → Slack approval → Google Sheets pipeline",
+  "private": true,
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
