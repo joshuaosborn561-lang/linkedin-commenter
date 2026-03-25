@@ -22,15 +22,24 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  // Acknowledge immediately (Slack requires <3s response)
-  res.status(200).end();
-
-  // Process asynchronously
-  if (body.event) {
-    await processEvent(body.event).catch(err =>
-      console.error('Event processing error:', err)
-    );
+  // Slack retries if it doesn't get 200 in 3s — deduplicate with x-slack-retry-num
+  const retryNum = req.headers['x-slack-retry-num'];
+  if (retryNum) {
+    console.log(`Ignoring Slack retry #${retryNum}`);
+    return res.status(200).end();
   }
+
+  // Process the event BEFORE responding so Vercel doesn't kill the function
+  if (body.event) {
+    try {
+      await processEvent(body.event);
+    } catch (err) {
+      console.error('Event processing error:', err);
+    }
+  }
+
+  // Respond after processing is complete
+  res.status(200).end();
 }
 
 async function processEvent(event) {
