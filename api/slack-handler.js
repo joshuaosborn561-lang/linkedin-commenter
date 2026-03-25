@@ -57,7 +57,7 @@ async function processEvent(event) {
       await writeToSheets('Sheet1!A:C', postUrl, comment, 'approved');
       // Also log to Voice Log for voice learning (includes post context)
       await writeToVoiceLog(postUrl, comment);
-      await sendSlackReply(event.channel, event.thread_ts, '✅ Comment saved to Google Sheet and queued for posting.');
+      await sendSlackReply(event.channel, event.thread_ts, `✅ Comment queued for posting:\n\`\`\`${comment}\`\`\``);
     } catch (err) {
       await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save to Google Sheet: ${err.message}`);
     }
@@ -150,11 +150,30 @@ async function getParentMessage(channel, threadTs) {
       console.error('Could not parse postUrl/comment from parent. Blocks:', JSON.stringify(parent.blocks));
     }
 
+    // Strip any Slack markdown artifacts so the sheet gets clean values
+    if (postUrl) postUrl = stripSlackFormatting(postUrl);
+    if (comment) comment = stripSlackFormatting(comment);
+
     return postUrl && comment ? { postUrl, comment } : null;
   } catch (e) {
     console.error('Error parsing parent message:', e);
     return null;
   }
+}
+
+function stripSlackFormatting(text) {
+  return text
+    // Convert Slack links <URL|label> to just URL, or <URL> to URL
+    .replace(/<([^|>]+)\|[^>]+>/g, '$1')
+    .replace(/<([^>]+)>/g, '$1')
+    // Remove bold/italic markers
+    .replace(/\*/g, '')
+    .replace(/_/g, '')
+    // Remove any remaining Slack special chars
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
 }
 
 async function writeToSheets(range, postUrl, comment, status) {
