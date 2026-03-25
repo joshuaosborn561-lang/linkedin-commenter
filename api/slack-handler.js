@@ -6,11 +6,26 @@ import crypto from 'crypto';
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
+  if (req.method === 'GET') {
+    // Diagnostic endpoint — hit /api/slack-handler in browser to confirm it's deployed
+    return res.status(200).json({ status: 'ok', message: 'Slack handler is live' });
+  }
   if (req.method !== 'POST') return res.status(405).end();
 
   // Read raw body for Slack signature verification
   const rawBody = await getRawBody(req);
   const body = JSON.parse(rawBody.toString());
+
+  // Log every incoming event for debugging
+  console.log('Slack event received:', JSON.stringify({
+    type: body.type,
+    eventType: body.event?.type,
+    subtype: body.event?.subtype,
+    botId: body.event?.bot_id,
+    threadTs: body.event?.thread_ts,
+    text: body.event?.text,
+    channel: body.event?.channel,
+  }));
 
   // Slack URL verification challenge
   if (body.type === 'url_verification') {
@@ -46,40 +61,44 @@ async function processEvent(event) {
   // Only handle messages from real users (not bots)
   if (event.type !== 'message') return;
   if (event.bot_id || event.subtype) return;
-  if (!event.thread_ts) return; // Must be a thread reply
+  if (!event.thread_ts) return; // Must be a thread reply on a specific message
 
   const text = (event.text || '').trim().toLowerCase();
   const originalText = (event.text || '').trim();
 
-  // Get the parent message to extract postUrl and comment
+  // Only process known commands
+  if (text !== 'post' && text !== 'skip' && !text.startsWith('edit ')) return;
+
+  console.log(`Processing command: "${text}" in thread ${event.thread_ts}`);
+
+  // Get the parent message (the bot review message you replied to)
   const parentData = await getParentMessage(event.channel, event.thread_ts);
   if (!parentData) {
-    console.log('Could not find parent message');
+    await sendSlackReply(event.channel, event.thread_ts, '⚠️ Could not parse the post URL and comment from this message. Try again or contact support.');
     return;
   }
 
   const { postUrl, comment } = parentData;
+  console.log(`Parsed postUrl: ${postUrl}, comment length: ${comment.length}`);
 
   if (text === 'post') {
     try {
-      // Write to Sheet1 for the phantom to post
       await writeToSheets('Sheet1!A:C', postUrl, comment, 'approved');
-      // Also log to Voice Log for voice learning (includes post context)
       await writeToVoiceLog(postUrl, comment);
       await sendSlackReply(event.channel, event.thread_ts, `✅ Comment queued for posting:\n\`\`\`${comment}\`\`\``);
     } catch (err) {
+      console.error('Sheet write failed:', err);
       await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save to Google Sheet: ${err.message}`);
     }
 
   } else if (text.startsWith('edit ')) {
     const editedComment = originalText.slice(5).trim();
     try {
-      // Write edited version to Sheet1 for posting
       await writeToSheets('Sheet1!A:C', postUrl, editedComment, 'edited');
-      // Log the user's actual edit to Voice Log — this is the real voice data
       await writeToVoiceLog(postUrl, editedComment);
       await sendSlackReply(event.channel, event.thread_ts, `✅ Your edit has been saved to Google Sheet:\n\`\`\`${editedComment}\`\`\``);
     } catch (err) {
+      console.error('Sheet write failed:', err);
       await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save edit to Google Sheet: ${err.message}`);
     }
 
