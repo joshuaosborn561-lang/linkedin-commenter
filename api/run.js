@@ -76,7 +76,8 @@ export default async function handler(req, res) {
 }
 
 async function generateComment(post) {
-  const prompt = buildPrompt(post);
+  const pastComments = await fetchPastComments();
+  const prompt = buildPrompt(post, pastComments);
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -99,7 +100,47 @@ async function generateComment(post) {
   return data.content[0].text.trim();
 }
 
-function buildPrompt(post) {
+async function fetchPastComments() {
+  try {
+    const token = await getGoogleAccessToken();
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    // Read from Voice Log sheet (col A = postUrl, col B = comment)
+    const range = 'Voice Log!A2:B';
+
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+
+    const data = await res.json();
+    if (!data.values) return [];
+    // Return up to 10 most recent entries as {postUrl, comment} pairs
+    return data.values
+      .filter(row => row[0] && row[1])
+      .slice(-10)
+      .map(row => ({ postUrl: row[0], comment: row[1] }));
+  } catch (e) {
+    console.error('Failed to fetch past comments:', e);
+    return [];
+  }
+}
+
+function buildPrompt(post, pastComments = []) {
+  let voiceSection = `Josh's voice samples for reference:
+- "Cold callers, are you feeling personally targeted?"
+- "Don't send any emails today. How much work could you do?"
+- "Lead Gen Agencies = Fractional SDRs, CROs, and IT Directors rolled into one."
+- "I have been saying this for a while...to my wife, but ask her, I really have!"`;
+
+  if (pastComments.length > 0) {
+    const samples = pastComments.map(c =>
+      `Post: ${c.postUrl}\nJosh's comment: "${c.comment}"`
+    ).join('\n\n');
+    voiceSection += `\n\nRecent approved/edited comments by Josh with their post context (learn from these — match this tone, style, and substance):\n${samples}`;
+  }
+
   return `You are writing a LinkedIn comment on behalf of Josh, founder of SalesGlider Growth — a B2B outbound lead gen agency. Josh has a $20M B2B sales background and posts regularly about cold email, outbound strategy, and GTM.
 
 Here is the LinkedIn post you are commenting on:
@@ -120,20 +161,12 @@ Write a LinkedIn comment in Josh's voice. Rules:
 - Quote or reference exact words from the post when it strengthens the comment
 - Return ONLY the comment text. No quotes around it. No preamble.
 
-Josh's voice samples for reference:
-- "Cold callers, are you feeling personally targeted?"
-- "Don't send any emails today. How much work could you do?"
-- "Lead Gen Agencies = Fractional SDRs, CROs, and IT Directors rolled into one."
-- "I have been saying this for a while...to my wife, but ask her, I really have!"
+${voiceSection}
 
 Write the comment now:`;
 }
 
 async function postToSlack(post, comment) {
-  const truncatedPost = post.postText.length > 400
-    ? post.postText.slice(0, 400) + '...'
-    : post.postText;
-
   const message = {
     channel: process.env.SLACK_CHANNEL_ID,
     text: `New LinkedIn comment ready for review`,
@@ -146,7 +179,14 @@ async function postToSlack(post, comment) {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*Post:*\n<${post.postUrl}|View on LinkedIn>\n\n*Post excerpt:*\n_"${truncatedPost}"_`,
+          text: `<${post.postUrl}|View on LinkedIn>`,
+        },
+      },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*Post:*\n${post.postText}`,
         },
       },
       { type: 'divider' },
@@ -154,7 +194,15 @@ async function postToSlack(post, comment) {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*Proposed comment:*\n\`\`\`${comment}\`\`\``,
+          text: `*Proposed comment:*\n${comment}`,
+        },
+      },
+      { type: 'divider' },
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `*post* — approve & save to sheet\n*edit [your comment]* — replace with yours & save\n*skip* — pass on this one`,
         },
       },
       {
@@ -162,16 +210,9 @@ async function postToSlack(post, comment) {
         elements: [
           {
             type: 'mrkdwn',
-            text: `Reply with *post* to approve • *edit [your text]* to replace • *skip* to reject`,
+            text: `postUrl::${post.postUrl}::comment::${comment}::end`,
           },
         ],
-      },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `_Post URL (for logging):_ ${post.postUrl}\n_Comment (for logging):_ ${comment}`,
-        },
       },
     ],
     metadata: {
@@ -204,7 +245,7 @@ async function clearSheet() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
   // Clear everything from row 2 onward (preserve header row)
-  const range = 'Sheet1!A2:B';
+  const range = 'Sheet1!A2:C';
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:clear`,
     {

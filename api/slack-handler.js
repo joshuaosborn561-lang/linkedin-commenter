@@ -6,11 +6,26 @@ import crypto from 'crypto';
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
+  if (req.method === 'GET') {
+    // Diagnostic endpoint — hit /api/slack-handler in browser to confirm it's deployed
+    return res.status(200).json({ status: 'ok', message: 'Slack handler is live' });
+  }
   if (req.method !== 'POST') return res.status(405).end();
 
   // Read raw body for Slack signature verification
   const rawBody = await getRawBody(req);
   const body = JSON.parse(rawBody.toString());
+
+  // Log every incoming event for debugging
+  console.log('Slack event received:', JSON.stringify({
+    type: body.type,
+    eventType: body.event?.type,
+    subtype: body.event?.subtype,
+    botId: body.event?.bot_id,
+    threadTs: body.event?.thread_ts,
+    text: body.event?.text,
+    channel: body.event?.channel,
+  }));
 
   // Slack URL verification challenge
   if (body.type === 'url_verification') {
@@ -22,45 +37,70 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  // Acknowledge immediately (Slack requires <3s response)
-  res.status(200).end();
-
-  // Process asynchronously
-  if (body.event) {
-    await processEvent(body.event).catch(err =>
-      console.error('Event processing error:', err)
-    );
+  // Slack retries if it doesn't get 200 in 3s — deduplicate with x-slack-retry-num
+  const retryNum = req.headers['x-slack-retry-num'];
+  if (retryNum) {
+    console.log(`Ignoring Slack retry #${retryNum}`);
+    return res.status(200).end();
   }
+
+  // Process the event BEFORE responding so Vercel doesn't kill the function
+  if (body.event) {
+    try {
+      await processEvent(body.event);
+    } catch (err) {
+      console.error('Event processing error:', err);
+    }
+  }
+
+  // Respond after processing is complete
+  res.status(200).end();
 }
 
 async function processEvent(event) {
   // Only handle messages from real users (not bots)
   if (event.type !== 'message') return;
   if (event.bot_id || event.subtype) return;
-  if (!event.thread_ts) return; // Must be a thread reply
+  if (!event.thread_ts) return; // Must be a thread reply on a specific message
 
   const text = (event.text || '').trim().toLowerCase();
   const originalText = (event.text || '').trim();
 
-  // Get the parent message to extract postUrl and comment
+  // Only process known commands
+  if (text !== 'post' && text !== 'skip' && !text.startsWith('edit ')) return;
+
+  console.log(`Processing command: "${text}" in thread ${event.thread_ts}`);
+
+  // Get the parent message (the bot review message you replied to)
   const parentData = await getParentMessage(event.channel, event.thread_ts);
   if (!parentData) {
-    console.log('Could not find parent message');
+    await sendSlackReply(event.channel, event.thread_ts, '⚠️ Could not parse the post URL and comment from this message. Try again or contact support.');
     return;
   }
 
   const { postUrl, comment } = parentData;
+  console.log(`Parsed postUrl: ${postUrl}, comment length: ${comment.length}`);
 
   if (text === 'post') {
-    // Approve — write to Google Sheets (col A = postUrl, col B = comment)
-    await writeToSheets(postUrl, comment);
-    await sendSlackReply(event.channel, event.thread_ts, '✅ Locked in. Comment queued for posting.');
+    try {
+      await writeToSheets('Sheet1!A:C', postUrl, comment, 'approved');
+      await writeToVoiceLog(postUrl, comment);
+      await sendSlackReply(event.channel, event.thread_ts, `✅ Comment queued for posting:\n\`\`\`${comment}\`\`\``);
+    } catch (err) {
+      console.error('Sheet write failed:', err);
+      await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save to Google Sheet: ${err.message}`);
+    }
 
   } else if (text.startsWith('edit ')) {
-    // Edit — use the user's replacement text
     const editedComment = originalText.slice(5).trim();
-    await writeToSheets(postUrl, editedComment);
-    await sendSlackReply(event.channel, event.thread_ts, `✅ Got it. Saved your edit:\n\`\`\`${editedComment}\`\`\`\nReply with *post* if you're happy with it.`);
+    try {
+      await writeToSheets('Sheet1!A:C', postUrl, editedComment, 'edited');
+      await writeToVoiceLog(postUrl, editedComment);
+      await sendSlackReply(event.channel, event.thread_ts, `✅ Your edit has been saved to Google Sheet:\n\`\`\`${editedComment}\`\`\``);
+    } catch (err) {
+      console.error('Sheet write failed:', err);
+      await sendSlackReply(event.channel, event.thread_ts, `❌ Failed to save edit to Google Sheet: ${err.message}`);
+    }
 
   } else if (text === 'skip') {
     await sendSlackReply(event.channel, event.thread_ts, '↩️ Comment skipped. Moving on.');
@@ -68,41 +108,79 @@ async function processEvent(event) {
 }
 
 async function getParentMessage(channel, threadTs) {
-  // Fetch the thread's parent message
   const res = await fetch(
-    `https://slack.com/api/conversations.replies?channel=${channel}&ts=${threadTs}&limit=1`,
+    `https://slack.com/api/conversations.replies?channel=${channel}&ts=${threadTs}&limit=1&include_all_metadata=true`,
     { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } }
   );
   const data = await res.json();
 
-  if (!data.ok || !data.messages || !data.messages[0]) return null;
+  if (!data.ok || !data.messages || !data.messages[0]) {
+    console.error('conversations.replies failed:', JSON.stringify(data));
+    return null;
+  }
 
   const parent = data.messages[0];
 
-  // Extract postUrl and comment from the message blocks
-  // They're stored in a plain-text section at the bottom of the message
   try {
-    const blocks = parent.blocks || [];
     let postUrl = null;
     let comment = null;
 
-    for (const block of blocks) {
-      if (block.type === 'section' && block.text?.text) {
+    // Try metadata first
+    if (parent.metadata?.event_payload) {
+      postUrl = parent.metadata.event_payload.postUrl;
+      comment = parent.metadata.event_payload.comment;
+    }
+
+    // Fallback: parse from block content directly
+    if (!postUrl) {
+      const blocks = parent.blocks || [];
+      for (const block of blocks) {
+        if (block.type !== 'section' || !block.text?.text) continue;
         const t = block.text.text;
-        if (t.includes('Post URL (for logging):')) {
-          const urlMatch = t.match(/Post URL \(for logging\): (https?:\/\/\S+)/);
-          if (urlMatch) postUrl = urlMatch[1];
-          const commentMatch = t.match(/Comment \(for logging\): (.+)/s);
-          if (commentMatch) comment = commentMatch[1].trim();
+
+        // Extract postUrl from the "View on LinkedIn" link: <URL|View on LinkedIn>
+        if (!postUrl) {
+          const linkMatch = t.match(/<([^|>]+)\|View on LinkedIn>/);
+          if (linkMatch) {
+            postUrl = linkMatch[1];
+          }
+        }
+
+        // Extract comment from the "Proposed comment:" section
+        if (!comment) {
+          const commentMatch = t.match(/^\*Proposed comment:\*\n([\s\S]+)$/);
+          if (commentMatch) {
+            comment = commentMatch[1].trim();
+          }
         }
       }
     }
 
-    // Fallback: try metadata if blocks didn't work
-    if (!postUrl && parent.metadata?.event_payload) {
-      postUrl = parent.metadata.event_payload.postUrl;
-      comment = parent.metadata.event_payload.comment;
+    // Final fallback: try context block with lenient regex (handles Slack URL formatting)
+    if (!postUrl) {
+      const blocks = parent.blocks || [];
+      for (const block of blocks) {
+        if (block.type === 'context' && block.elements) {
+          for (const el of block.elements) {
+            const t = el.text || '';
+            // Handle Slack auto-linking: postUrl::<URL|text>::comment::...::end
+            const match = t.match(/postUrl::<?([^|>\s]+)[^:]*::comment::(.+?)::end/s);
+            if (match) {
+              postUrl = match[1].trim();
+              comment = match[2].trim();
+            }
+          }
+        }
+      }
     }
+
+    if (!postUrl || !comment) {
+      console.error('Could not parse postUrl/comment from parent. Blocks:', JSON.stringify(parent.blocks));
+    }
+
+    // Strip any Slack markdown artifacts so the sheet gets clean values
+    if (postUrl) postUrl = stripSlackFormatting(postUrl);
+    if (comment) comment = stripSlackFormatting(comment);
 
     return postUrl && comment ? { postUrl, comment } : null;
   } catch (e) {
@@ -111,31 +189,65 @@ async function getParentMessage(channel, threadTs) {
   }
 }
 
-async function writeToSheets(postUrl, comment) {
-  // Get OAuth token
+function stripSlackFormatting(text) {
+  return text
+    // Convert Slack links <URL|label> to just URL, or <URL> to URL
+    .replace(/<([^|>]+)\|[^>]+>/g, '$1')
+    .replace(/<([^>]+)>/g, '$1')
+    // Remove bold/italic markers
+    .replace(/\*/g, '')
+    .replace(/_/g, '')
+    // Remove any remaining Slack special chars
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+async function writeToSheets(range, postUrl, comment, status) {
   const token = await getGoogleAccessToken();
-
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  const range = 'Sheet1!A:B';
-
-  const body = {
-    values: [[postUrl, comment]],
-  };
 
   const res = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`,
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
     {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ values: [[postUrl, comment, status]] }),
     }
   );
 
   const data = await res.json();
   if (data.error) throw new Error(`Sheets error: ${JSON.stringify(data.error)}`);
+  return data;
+}
+
+async function writeToVoiceLog(postUrl, comment) {
+  const token = await getGoogleAccessToken();
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  const range = 'Voice Log!A:C';
+  const timestamp = new Date().toISOString();
+
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ values: [[postUrl, comment, timestamp]] }),
+    }
+  );
+
+  const data = await res.json();
+  if (data.error) {
+    // Don't throw — voice log failure shouldn't block the main flow
+    console.error('Voice log write failed:', data.error);
+  }
   return data;
 }
 

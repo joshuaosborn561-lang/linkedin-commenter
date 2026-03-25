@@ -11,104 +11,41 @@ export default async function handler(req, res) {
   try {
     // 1. Fetch PhantomBuster agent metadata to get S3 file location
     const pbKey = process.env.PHANTOMBUSTER_API_KEY;
-    if (!pbKey || !process.env.PHANTOM_ID) {
-      return res.status(500).json({ error: 'Missing env vars', hasPbKey: !!pbKey, hasPhantomId: !!process.env.PHANTOM_ID });
-    }
-
-    let agentRes;
-    try {
-      agentRes = await fetch(
-        `https://api.phantombuster.com/api/v2/agents/fetch?id=${process.env.PHANTOM_ID}`,
-        {
-          headers: {
-            'X-Phantombuster-Key': pbKey,
-            'X-Phantombuster-Key-1': pbKey,
-          },
-        }
-      );
-    } catch (fetchErr) {
-      return res.status(500).json({ error: 'PhantomBuster fetch failed', message: fetchErr.message });
-    }
+    const agentRes = await fetch(
+      `https://api.phantombuster.com/api/v2/agents/fetch?id=${process.env.PHANTOM_ID}`,
+      {
+        headers: {
+          'X-Phantombuster-Key': pbKey,
+          'X-Phantombuster-Key-1': pbKey,
+        },
+      }
+    );
     const agent = await agentRes.json();
 
     if (!agent.id) {
       return res.status(500).json({ error: 'Failed to fetch agent', details: agent });
     }
 
-    // 2. Fetch results — try the output endpoint first, fallback to S3
     const { s3Folder, orgS3Folder } = agent;
+    const jsonUrl = `https://cache1.phantombuster.com/${orgS3Folder}/${s3Folder}/result.json`;
 
-    // Try PhantomBuster's fetch-output endpoint (returns actual scrape results)
-    let posts;
-    try {
-      const outputRes = await fetch(
-        `https://api.phantombuster.com/api/v2/agents/fetch-output?id=${process.env.PHANTOM_ID}`,
-        {
-          headers: {
-            'X-Phantombuster-Key': pbKey,
-            'X-Phantombuster-Key-1': pbKey,
-          },
-        }
-      );
-      const outputData = await outputRes.json();
-
-      // The output contains a resultObject field with the JSON results
-      if (outputData.resultObject) {
-        posts = JSON.parse(outputData.resultObject);
-      } else {
-        // Fallback: try S3 result.json
-        const jsonUrl = `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`;
-        const resultsRes = await fetch(jsonUrl);
-        if (!resultsRes.ok) {
-          return res.status(500).json({ error: 'Failed to fetch results', url: jsonUrl, status: resultsRes.status });
-        }
-        posts = await resultsRes.json();
-      }
-    } catch (fetchErr) {
-      // Fallback: try S3 result.json
-      const jsonUrl = `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`;
-      const resultsRes = await fetch(jsonUrl);
-      if (!resultsRes.ok) {
-        return res.status(500).json({ error: 'Failed to fetch results', url: jsonUrl, status: resultsRes.status });
-      }
-      posts = await resultsRes.json();
+    // 2. Fetch the actual results JSON
+    const resultsRes = await fetch(jsonUrl);
+    if (!resultsRes.ok) {
+      return res.status(500).json({ error: 'Failed to fetch results JSON', url: jsonUrl });
     }
 
-    if (!Array.isArray(posts)) {
-      posts = [posts];
-    }
+    const posts = await resultsRes.json();
 
-    // 3. Normalize field names — PhantomBuster uses varying key names
-    const normalized = posts.map(p => ({
-      postUrl: p.postUrl || p.url || p.link || p.postLink || '',
-      postText: p.postText || p.text || p.description || p.content || p.postContent || '',
-      profileUrl: p.profileUrl || p.authorProfileUrl || p.authorUrl || p.profile || '',
-      _raw: p,
-    }));
-
-    const validPosts = normalized.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
+    // 3. Filter to posts that have actual content
+    const validPosts = posts.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
 
     if (validPosts.length === 0) {
-      const errors = posts.filter(p => p.error).map(p => p.error);
-      const uniqueErrors = [...new Set(errors)];
-      return res.status(200).json({
-        message: 'No valid posts found',
-        total: posts.length,
-        postsWithErrors: errors.length,
-        errors: uniqueErrors,
-        hint: uniqueErrors.includes('No new results found')
-          ? 'PhantomBuster returned no new results. Try re-running the phantom or resetting its result file.'
-          : 'Posts are missing postUrl or postText fields.',
-        firstPost: posts[0],
-      });
+      return res.status(200).json({ message: 'No valid posts found', total: posts.length });
     }
 
     // 4. Clear the Google Sheet (except header row) before this batch
-    try {
-      await clearSheet();
-    } catch (sheetErr) {
-      return res.status(500).json({ error: 'clearSheet failed', message: sheetErr.message, cause: sheetErr.cause?.message });
-    }
+    await clearSheet();
 
     // 5. For each post, generate a comment and post to Slack
     const results = [];
@@ -127,7 +64,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ processed: results.length, results });
   } catch (err) {
     console.error('Run error:', err);
-    return res.status(500).json({ error: err.message, stack: err.stack, cause: err.cause?.message });
+    return res.status(500).json({ error: err.message });
   }
 }
 
@@ -260,7 +197,7 @@ async function clearSheet() {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
   // Clear everything from row 2 onward (preserve header row)
-  const range = 'Sheet1!A2:B';
+  const range = 'Sheet1!A2:C';
   const res = await fetch(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:clear`,
     {
