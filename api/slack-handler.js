@@ -80,14 +80,16 @@ async function processEvent(event) {
 }
 
 async function getParentMessage(channel, threadTs) {
-  // Fetch the thread's parent message with metadata included
   const res = await fetch(
     `https://slack.com/api/conversations.replies?channel=${channel}&ts=${threadTs}&limit=1&include_all_metadata=true`,
     { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } }
   );
   const data = await res.json();
 
-  if (!data.ok || !data.messages || !data.messages[0]) return null;
+  if (!data.ok || !data.messages || !data.messages[0]) {
+    console.error('conversations.replies failed:', JSON.stringify(data));
+    return null;
+  }
 
   const parent = data.messages[0];
 
@@ -95,20 +97,46 @@ async function getParentMessage(channel, threadTs) {
     let postUrl = null;
     let comment = null;
 
-    // Try metadata first (most reliable)
+    // Try metadata first
     if (parent.metadata?.event_payload) {
       postUrl = parent.metadata.event_payload.postUrl;
       comment = parent.metadata.event_payload.comment;
     }
 
-    // Fallback: parse the hidden context block (postUrl::...::comment::...::end)
+    // Fallback: parse from block content directly
+    if (!postUrl) {
+      const blocks = parent.blocks || [];
+      for (const block of blocks) {
+        if (block.type !== 'section' || !block.text?.text) continue;
+        const t = block.text.text;
+
+        // Extract postUrl from the "View on LinkedIn" link: <URL|View on LinkedIn>
+        if (!postUrl) {
+          const linkMatch = t.match(/<([^|>]+)\|View on LinkedIn>/);
+          if (linkMatch) {
+            postUrl = linkMatch[1];
+          }
+        }
+
+        // Extract comment from the "Proposed comment:" section
+        if (!comment) {
+          const commentMatch = t.match(/^\*Proposed comment:\*\n([\s\S]+)$/);
+          if (commentMatch) {
+            comment = commentMatch[1].trim();
+          }
+        }
+      }
+    }
+
+    // Final fallback: try context block with lenient regex (handles Slack URL formatting)
     if (!postUrl) {
       const blocks = parent.blocks || [];
       for (const block of blocks) {
         if (block.type === 'context' && block.elements) {
           for (const el of block.elements) {
             const t = el.text || '';
-            const match = t.match(/postUrl::(.+?)::comment::(.+?)::end/s);
+            // Handle Slack auto-linking: postUrl::<URL|text>::comment::...::end
+            const match = t.match(/postUrl::<?([^|>\s]+)[^:]*::comment::(.+?)::end/s);
             if (match) {
               postUrl = match[1].trim();
               comment = match[2].trim();
@@ -116,6 +144,10 @@ async function getParentMessage(channel, threadTs) {
           }
         }
       }
+    }
+
+    if (!postUrl || !comment) {
+      console.error('Could not parse postUrl/comment from parent. Blocks:', JSON.stringify(parent.blocks));
     }
 
     return postUrl && comment ? { postUrl, comment } : null;
