@@ -38,13 +38,23 @@ export default async function handler(req, res) {
     const posts = await resultsRes.json();
 
     // 3. Filter to posts that have actual content
-    const validPosts = posts.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
+    // Normalize field names
+    const normalized = posts.map(p => ({
+      postUrl: p.postUrl || p.url || p.link || p.postLink || '',
+      postText: p.postText || p.text || p.description || p.content || p.postContent || '',
+      profileUrl: p.profileUrl || p.authorProfileUrl || p.authorUrl || p.profile || '',
+    }));
+
+    const validPosts = normalized.filter(p => p.postUrl && p.postText && p.postText.trim().length > 20);
 
     if (validPosts.length === 0) {
       return res.status(200).json({ message: 'No valid posts found', total: posts.length });
     }
 
-    // 4. For each post, generate a comment and post to Slack
+    // 4. Clear the Google Sheet (except header row) before this batch
+    await clearSheet();
+
+    // 5. For each post, generate a comment and post to Slack
     const results = [];
     for (const post of validPosts.slice(0, 20)) {
       try {
