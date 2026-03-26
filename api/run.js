@@ -51,10 +51,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: 'No valid posts found', total: posts.length });
     }
 
-    // 4. Clear the Google Sheet (except header row) before this batch
-    await clearSheet();
-
-    // 5. For each post, generate a comment and post to Slack
+    // 4. For each post, generate a comment and post to Slack
     const results = [];
     for (const post of validPosts.slice(0, 20)) {
       try {
