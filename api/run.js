@@ -47,12 +47,31 @@ export default async function handler(req, res) {
     }
 
     const { s3Folder, orgS3Folder } = agent;
-    const jsonUrl = `https://cache1.phantombuster.com/${orgS3Folder}/${s3Folder}/result.json`;
 
-    // 2. Fetch the actual results JSON
-    const resultsRes = await fetch(jsonUrl);
-    if (!resultsRes.ok) {
-      return res.status(500).json({ error: 'Failed to fetch results JSON', url: jsonUrl });
+    // 2. Fetch the actual results JSON — try multiple PhantomBuster CDN domains
+    const cdnDomains = [
+      `https://phantombuster.s3.amazonaws.com/${orgS3Folder}/${s3Folder}/result.json`,
+      `https://cache2.phantombuster.com/${orgS3Folder}/${s3Folder}/result.json`,
+      `https://cache1.phantombuster.com/${orgS3Folder}/${s3Folder}/result.json`,
+    ];
+
+    let resultsRes = null;
+    let jsonUrl = null;
+    for (const url of cdnDomains) {
+      try {
+        const r = await fetch(url);
+        if (r.ok) {
+          resultsRes = r;
+          jsonUrl = url;
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    if (!resultsRes) {
+      return res.status(500).json({ error: 'Failed to fetch results JSON from all CDN domains', tried: cdnDomains });
     }
 
     const posts = await resultsRes.json();
