@@ -33,7 +33,11 @@ export default async function handler(req, res) {
         }
       );
     } catch (fetchErr) {
-      return res.status(500).json({ error: 'PB API fetch failed', message: fetchErr.message });
+      return res.status(500).json({
+        error: 'PB API fetch failed',
+        message: fetchErr.message,
+        cause: fetchErr.cause?.message || fetchErr.cause || 'no cause',
+      });
     }
 
     const agent = await agentRes.json();
@@ -84,7 +88,11 @@ export default async function handler(req, res) {
     return res.status(200).json({ processed: results.length, results });
   } catch (err) {
     console.error('Run error:', err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({
+      error: err.message,
+      cause: err.cause?.message || err.cause || 'no cause',
+      stack: err.stack?.split('\n').slice(0, 3),
+    });
   }
 }
 
