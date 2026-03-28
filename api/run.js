@@ -11,15 +11,31 @@ export default async function handler(req, res) {
   try {
     // 1. Fetch PhantomBuster agent metadata to get S3 file location
     const pbKey = process.env.PHANTOMBUSTER_API_KEY;
-    const agentRes = await fetch(
-      `https://api.phantombuster.com/api/v2/agents/fetch?id=${process.env.PHANTOM_ID}`,
-      {
-        headers: {
-          'X-Phantombuster-Key': pbKey,
-          'X-Phantombuster-Key-1': pbKey,
-        },
-      }
-    );
+    const phantomId = process.env.PHANTOM_ID;
+
+    if (!pbKey || !phantomId) {
+      return res.status(500).json({
+        error: 'Missing env vars',
+        hasPbKey: !!pbKey,
+        hasPhantomId: !!phantomId,
+      });
+    }
+
+    let agentRes;
+    try {
+      agentRes = await fetch(
+        `https://api.phantombuster.com/api/v2/agents/fetch?id=${phantomId}`,
+        {
+          headers: {
+            'X-Phantombuster-Key': pbKey,
+            'X-Phantombuster-Key-1': pbKey,
+          },
+        }
+      );
+    } catch (fetchErr) {
+      return res.status(500).json({ error: 'PB API fetch failed', message: fetchErr.message });
+    }
+
     const agent = await agentRes.json();
 
     if (!agent.id) {
